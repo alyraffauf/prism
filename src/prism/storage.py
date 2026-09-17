@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .models.collection import (
     CollectedPage,
-    CollectionKind,
+    CollectionTask,
     TaskState,
     validate_page,
     validate_task_state,
@@ -111,10 +111,10 @@ class Store:
         completed.pop("publication", None)
         self.save_snapshot(completed)
 
-    def task(self, snapshot: str, actor: str, kind: CollectionKind) -> TaskState:
+    def task(self, task: CollectionTask) -> TaskState:
         row = self.connection.execute(
             "SELECT data FROM tasks WHERE snapshot=? AND actor=? AND kind=?",
-            (snapshot, actor, kind),
+            (task.snapshot_id, task.actor, task.kind),
         ).fetchone()
         if row:
             return validate_task_state(json.loads(row[0]), "stored task")
@@ -126,37 +126,33 @@ class Store:
             "restarts": 0,
         }
 
-    def save_task(self, snapshot: str, actor: str, kind: CollectionKind, state: TaskState) -> None:
+    def save_task(self, task: CollectionTask, state: TaskState) -> None:
         validate_task_state(state)
         with self.connection:
-            self._save_task(snapshot, actor, kind, state)
+            self._save_task(task, state)
 
-    def _save_task(self, snapshot: str, actor: str, kind: CollectionKind, state: TaskState) -> None:
+    def _save_task(self, task: CollectionTask, state: TaskState) -> None:
         self.connection.execute(
             "INSERT OR REPLACE INTO tasks VALUES (?, ?, ?, ?)",
-            (snapshot, actor, kind, json.dumps(state)),
+            (task.snapshot_id, task.actor, task.kind, json.dumps(state)),
         )
 
     def save_page(
         self,
-        snapshot: str,
-        actor: str,
-        kind: CollectionKind,
+        task: CollectionTask,
         state: TaskState,
         page: CollectedPage,
     ) -> None:
-        validate_page(page, kind)
+        validate_page(page, task.kind)
         # Commit the page and cursor together so a crash cannot leave them out of sync.
         with self.connection:
             self.connection.execute(
                 "INSERT INTO pages VALUES (?, ?, ?, ?, ?)",
-                (snapshot, actor, kind, state["pages"], json.dumps(page)),
+                (task.snapshot_id, task.actor, task.kind, state["pages"], json.dumps(page)),
             )
-            self._save_task(snapshot, actor, kind, state)
+            self._save_task(task, state)
 
-    def restart_task(
-        self, snapshot: str, actor: str, kind: CollectionKind, state: TaskState
-    ) -> None:
+    def restart_task(self, task: CollectionTask, state: TaskState) -> None:
         state.update(
             cursor=None,
             pages=0,
@@ -167,16 +163,17 @@ class Store:
         )
         with self.connection:
             self.connection.execute(
-                "DELETE FROM pages WHERE snapshot=? AND actor=? AND kind=?", (snapshot, actor, kind)
+                "DELETE FROM pages WHERE snapshot=? AND actor=? AND kind=?",
+                (task.snapshot_id, task.actor, task.kind),
             )
-            self._save_task(snapshot, actor, kind, state)
+            self._save_task(task, state)
 
-    def pages(self, snapshot: str, actor: str, kind: CollectionKind) -> list[CollectedPage]:
+    def pages(self, task: CollectionTask) -> list[CollectedPage]:
         rows = self.connection.execute(
             "SELECT data FROM pages WHERE snapshot=? AND actor=? AND kind=? ORDER BY number",
-            (snapshot, actor, kind),
+            (task.snapshot_id, task.actor, task.kind),
         )
-        return [validate_page(json.loads(row[0]), kind, "stored page") for row in rows]
+        return [validate_page(json.loads(row[0]), task.kind, "stored page") for row in rows]
 
     def registered_lists(self, actor: str) -> list[ManagedList]:
         values = [

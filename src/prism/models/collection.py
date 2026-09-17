@@ -1,10 +1,18 @@
 """Data collected from Bluesky and saved for clustering."""
 
+from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
 TaskStatus = Literal["pending", "complete", "unavailable", "failed"]
 InteractionKind = Literal["reply", "quote", "repost"]
 CollectionKind = Literal["profile", "follows", "feed", "root_follows"]
+
+
+@dataclass(frozen=True)
+class CollectionTask:
+    snapshot_id: str
+    actor: str
+    kind: CollectionKind
 
 
 class Person(TypedDict):

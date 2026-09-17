@@ -10,6 +10,7 @@ from .models.collection import (
     AccountCoverage,
     CollectedSnapshot,
     CollectionKind,
+    CollectionTask,
     CoverageState,
     Event,
     FeedPage,
@@ -71,32 +72,23 @@ def event_key(event: Event) -> tuple[str, str, str, str, str]:
     )
 
 
-def interactions(item: dict[str, Any], actor: str) -> list[Event]:
+def repost_interaction(item: dict[str, Any], actor: str, event_time: str, uri: str) -> list[Event]:
+    reason = item.get("reason", {})
+    if reason.get("by", {}).get("did") != actor:
+        return []
+    target = item.get("post", {}).get("author", {}).get("did")
+    return (
+        [{"source": actor, "target": target, "kind": "repost", "time": event_time, "uri": uri}]
+        if target and target != actor
+        else []
+    )
+
+
+def authored_post_interactions(
+    item: dict[str, Any], actor: str, event_time: str, uri: str
+) -> list[Event]:
     post = item.get("post", {})
     record = post.get("record", {})
-    reason = item.get("reason", {})
-    when = activity_time(item)
-    uri = post.get("uri")
-    if when is None or not isinstance(uri, str) or not uri:
-        return []
-    event_time = when.isoformat()
-    if reason.get("$type") == "app.bsky.feed.defs#reasonRepost":
-        if reason.get("by", {}).get("did") != actor:
-            return []
-        target = post.get("author", {}).get("did")
-        return (
-            [
-                {
-                    "source": actor,
-                    "target": target,
-                    "kind": "repost",
-                    "time": event_time,
-                    "uri": uri,
-                }
-            ]
-            if target and target != actor
-            else []
-        )
     if post.get("author", {}).get("did") != actor:
         return []
     events: list[Event] = []
@@ -122,6 +114,17 @@ def interactions(item: dict[str, Any], actor: str) -> list[Event]:
                 }
             )
     return events
+
+
+def interactions(item: dict[str, Any], actor: str) -> list[Event]:
+    when = activity_time(item)
+    uri = item.get("post", {}).get("uri")
+    if when is None or not isinstance(uri, str) or not uri:
+        return []
+    event_time = when.isoformat()
+    if item.get("reason", {}).get("$type") == "app.bsky.feed.defs#reasonRepost":
+        return repost_interaction(item, actor, event_time, uri)
+    return authored_post_interactions(item, actor, event_time, uri)
 
 
 def profile_fields(person: object) -> Person:
@@ -163,8 +166,12 @@ class Collector:
         self.members: set[str] = set()
         self.last_progress = 0.0
 
+    def task(self, actor: str, kind: CollectionKind) -> CollectionTask:
+        return CollectionTask(self.identifier, actor, kind)
+
     async def fetch_profile(self, actor: str) -> TaskState:
-        state = self.store.task(self.identifier, actor, "profile")
+        task = self.task(actor, "profile")
+        state = self.store.task(task)
         if state["status"] == "complete" or (
             state["status"] == "unavailable" and actor != self.snapshot["actor"]["did"]
         ):
@@ -178,7 +185,7 @@ class Collector:
             state.update(status="complete", profile=profile_fields(profile), error=None)
         except APIError as error:
             state.update(status="unavailable" if error.unavailable else "failed", error=str(error))
-        self.store.save_task(self.identifier, actor, "profile", state)
+        self.store.save_task(task, state)
         return state
 
     def feed_page(self, page: dict[str, Any], actor: str) -> FeedPage:
@@ -221,8 +228,23 @@ class Collector:
         }
         return saved
 
+    def follows_page(self, page: dict[str, Any], kind: CollectionKind) -> PeoplePage:
+        raw_people = page.get("follows")
+        if not isinstance(raw_people, list):
+            raise ValueError("Invalid response.follows: expected a list")
+        people = [profile_fields(person) for person in raw_people]
+        if kind == "follows":
+            people = [{"did": person["did"]} for person in people]
+        return {"people": cast(list[Person], people)}
+
+    def collected_page(self, page: dict[str, Any], task: CollectionTask) -> PeoplePage | FeedPage:
+        if task.kind == "feed":
+            return self.feed_page(page, task.actor)
+        return self.follows_page(page, task.kind)
+
     async def fetch_pages(self, actor: str, kind: CollectionKind) -> None:
-        state = self.store.task(self.identifier, actor, kind)
+        task = self.task(actor, kind)
+        state = self.store.task(task)
         if state["status"] == "complete" or (
             state["status"] == "unavailable" and kind != "root_follows"
         ):
@@ -241,19 +263,7 @@ class Collector:
                 if self.api is None:
                     raise ValueError("Collection requires a Bluesky client")
                 page = await self.api.get(method, **params)
-                if kind == "feed":
-                    saved = self.feed_page(page, actor)
-                else:
-                    raw_people = page.get("follows")
-                    if not isinstance(raw_people, list):
-                        raise ValueError("Invalid response.follows: expected a list")
-                    people = [profile_fields(person) for person in raw_people]
-                    if kind == "follows":
-                        people = [{"did": person["did"]} for person in people]
-                    saved = cast(
-                        PeoplePage,
-                        {"people": people},
-                    )
+                saved = self.collected_page(page, task)
                 validate_page(saved, kind, "collected_page")
                 cursor = page.get("cursor")
                 done = not cursor or saved.get("before_window", False)
@@ -267,7 +277,7 @@ class Collector:
                 )
                 if cursor:
                     state["cursors"].append(cursor)
-                self.store.save_page(self.identifier, actor, kind, state, saved)
+                self.store.save_page(task, state, saved)
                 now = asyncio.get_running_loop().time()
                 if now - self.last_progress >= 20:
                     self.progress(f"Collecting {kind}: {actor}, page {state['pages']}")
@@ -276,19 +286,19 @@ class Collector:
                     return
             except APIError as error:
                 if error.invalid_cursor and state["cursor"] and not restarted:
-                    self.store.restart_task(self.identifier, actor, kind, state)
+                    self.store.restart_task(task, state)
                     restarted = True
                     continue
                 state.update(
                     status="unavailable" if error.unavailable else "failed", error=str(error)
                 )
-                self.store.save_task(self.identifier, actor, kind, state)
+                self.store.save_task(task, state)
                 return
             except (KeyError, TypeError, AttributeError) as error:
                 state.update(
                     status="failed", error=f"Malformed {kind} page: {type(error).__name__}"
                 )
-                self.store.save_task(self.identifier, actor, kind, state)
+                self.store.save_task(task, state)
                 return
 
     async def collect(self) -> CollectedSnapshot:
@@ -299,7 +309,7 @@ class Collector:
         self.snapshot["actor"] = profile["profile"]
         self.store.save_snapshot(self.snapshot)
         await self.fetch_pages(actor, "root_follows")
-        if self.store.task(self.identifier, actor, "root_follows")["status"] != "complete":
+        if self.store.task(self.task(actor, "root_follows"))["status"] != "complete":
             raise IncompleteSnapshot("The account's follow list is incomplete. Run prism resume")
         people = self.followed_people(actor, "root_follows")
         self.members = set(people)
@@ -308,28 +318,7 @@ class Collector:
             f"{profile['profile'].get('followsCount')}"
         )
         self.progress(f"Collecting with up to {self.concurrency} concurrent requests")
-        queue: asyncio.Queue[tuple[str, CollectionKind]] = asyncio.Queue()
-        remaining = dict.fromkeys(people, 3)
-        for did in sorted(people):
-            for kind in ("profile", "follows", "feed"):
-                queue.put_nowait((did, kind))
-        finished = 0
-
-        async def reader():
-            nonlocal finished
-            while not queue.empty():
-                did, kind = queue.get_nowait()
-                if kind == "profile":
-                    await self.fetch_profile(did)
-                else:
-                    await self.fetch_pages(did, kind)
-                remaining[did] -= 1
-                if remaining[did] == 0:
-                    finished += 1
-                    if finished % 20 == 0 or finished == len(people):
-                        self.progress(f"Collected {finished}/{len(people)} accounts")
-
-        await asyncio.gather(*(reader() for _ in range(self.concurrency)))
+        await self.collect_account_tasks(people)
         snapshot = self.export()
         if snapshot["temporary_failures"]:
             raise IncompleteSnapshot(
@@ -340,15 +329,39 @@ class Collector:
         self.store.save_snapshot(self.snapshot)
         return snapshot
 
+    async def collect_account_tasks(self, people: dict[str, Person]) -> None:
+        account_tasks: asyncio.Queue[tuple[str, CollectionKind]] = asyncio.Queue()
+        outstanding_account_tasks = dict.fromkeys(people, 3)
+        for did in sorted(people):
+            for kind in ("profile", "follows", "feed"):
+                account_tasks.put_nowait((did, kind))
+        completed_accounts = 0
+
+        async def account_task_worker() -> None:
+            nonlocal completed_accounts
+            while not account_tasks.empty():
+                did, kind = account_tasks.get_nowait()
+                if kind == "profile":
+                    await self.fetch_profile(did)
+                else:
+                    await self.fetch_pages(did, kind)
+                outstanding_account_tasks[did] -= 1
+                if outstanding_account_tasks[did] == 0:
+                    completed_accounts += 1
+                    if completed_accounts % 20 == 0 or completed_accounts == len(people):
+                        self.progress(f"Collected {completed_accounts}/{len(people)} accounts")
+
+        await asyncio.gather(*(account_task_worker() for _ in range(self.concurrency)))
+
     def followed_people(self, actor: str, kind: CollectionKind) -> dict[str, Person]:
         return {
             person["did"]: person
-            for page in self.store.pages(self.identifier, actor, kind)
+            for page in self.store.pages(self.task(actor, kind))
             for person in cast(PeoplePage, page)["people"]
         }
 
     def coverage(self, actor: str, kind: CollectionKind) -> CoverageState:
-        state = self.store.task(self.identifier, actor, kind)
+        state = self.store.task(self.task(actor, kind))
         return {
             "status": state["status"],
             "error": state.get("error"),
@@ -363,6 +376,55 @@ class Collector:
             if key not in {"result", "publication"}
         }
 
+    def export_account(
+        self, did: str, person: Person, members: set[str]
+    ) -> tuple[
+        set[tuple[str, str]], dict[tuple[str, str, str, str, str], Event], AccountCoverage, int
+    ]:
+        profile = self.store.task(self.task(did, "profile"))
+        if "profile" in profile:
+            person.update(profile["profile"])
+        followed = self.followed_people(did, "follows")
+        account_follows = {
+            (did, target) for target in followed if target in members and target != did
+        }
+        account_events: dict[tuple[str, str, str, str, str], Event] = {}
+        invalid_timestamps = 0
+        authored_posts = set()
+        activity_available = self.store.task(self.task(did, "feed"))["status"] == "complete"
+        for page in self.store.pages(self.task(did, "feed")):
+            feed_page = cast(FeedPage, page)
+            invalid_timestamps += feed_page["invalid_timestamps"]
+            activity_available = activity_available and "authored_posts" in feed_page
+            authored_posts.update(feed_page.get("authored_posts", []))
+            for event in feed_page["events"]:
+                account_events[event_key(event)] = event
+        person["authored_post_count"] = (
+            len(authored_posts) if activity_available and not invalid_timestamps else None
+        )
+        profile_coverage = self.coverage(did, "profile")
+        follows_coverage = self.coverage(did, "follows")
+        feed_coverage = self.coverage(did, "feed")
+        expected_follows = person.get("followsCount")
+        account_coverage: AccountCoverage = {
+            "did": did,
+            "handle": person.get("handle"),
+            "profile": profile_coverage,
+            "follows": follows_coverage,
+            "feed": feed_coverage,
+            "reported_follows": expected_follows,
+            "fetched_follows": len(followed),
+            "follow_count_difference": expected_follows - len(followed)
+            if expected_follows is not None
+            else None,
+            "invalid_timestamps": invalid_timestamps,
+        }
+        failures = sum(
+            state["status"] not in {"complete", "unavailable"}
+            for state in (profile_coverage, follows_coverage, feed_coverage)
+        )
+        return account_follows, account_events, account_coverage, failures
+
     def export(self) -> CollectedSnapshot:
         actor = self.snapshot["actor"]["did"]
         people = self.followed_people(actor, "root_follows")
@@ -373,49 +435,13 @@ class Collector:
         root = self.coverage(actor, "root_follows")
         failures = int(root["status"] != "complete")
         for did, person in sorted(people.items()):
-            profile = self.store.task(self.identifier, did, "profile")
-            if "profile" in profile:
-                person.update(profile["profile"])
-            followed = self.followed_people(did, "follows")
-            follows.update(
-                (did, target) for target in followed if target in members and target != did
+            account_follows, account_events, account_coverage, account_failures = (
+                self.export_account(did, person, members)
             )
-            invalid = 0
-            authored_posts = set()
-            activity_available = (
-                self.store.task(self.identifier, did, "feed")["status"] == "complete"
-            )
-            for page in self.store.pages(self.identifier, did, "feed"):
-                page = cast(FeedPage, page)
-                invalid += page["invalid_timestamps"]
-                activity_available = activity_available and "authored_posts" in page
-                authored_posts.update(page.get("authored_posts", []))
-                for event in page["events"]:
-                    events[event_key(event)] = event
-            person["authored_post_count"] = (
-                len(authored_posts) if activity_available and not invalid else None
-            )
-            profile_coverage = self.coverage(did, "profile")
-            follows_coverage = self.coverage(did, "follows")
-            feed_coverage = self.coverage(did, "feed")
-            states = (profile_coverage, follows_coverage, feed_coverage)
-            failures += sum(state["status"] not in {"complete", "unavailable"} for state in states)
-            expected = person.get("followsCount")
-            coverage.append(
-                {
-                    "did": did,
-                    "handle": person.get("handle"),
-                    "profile": profile_coverage,
-                    "follows": follows_coverage,
-                    "feed": feed_coverage,
-                    "reported_follows": expected,
-                    "fetched_follows": len(followed),
-                    "follow_count_difference": expected - len(followed)
-                    if expected is not None
-                    else None,
-                    "invalid_timestamps": invalid,
-                }
-            )
+            follows.update(account_follows)
+            events.update(account_events)
+            coverage.append(account_coverage)
+            failures += account_failures
         reported = self.snapshot["actor"].get("followsCount")
         return cast(
             CollectedSnapshot,
