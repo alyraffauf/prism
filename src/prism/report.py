@@ -10,6 +10,42 @@ from .models.collection import CollectedSnapshot, Person
 from .models.runs import RunRecord
 from .storage import write_json
 
+DOCUMENT_STYLE = "".join(
+    (
+        "body{font:16px/1.55 system-ui,sans-serif;max-width:1100px;margin:auto;padding:24px;",
+        "color:#17213a;background:#fafbff}a{color:#174bab}small{color:#4d5870}",
+        "table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}",
+        "th,td{text-align:left;padding:8px;border-bottom:1px solid #d3daea;vertical-align:top}",
+        "section{margin:28px 0;padding:20px;background:white;border:1px solid #d3daea;",
+        "border-radius:12px}summary{cursor:pointer;font-weight:600}li{margin:5px 0}",
+        ".members{columns:3;column-width:250px}code{overflow-wrap:anywhere}",
+        ".list-icon{display:inline-block;width:36px;height:36px;vertical-align:middle;",
+        "margin-right:12px;border:1px solid #d3daea}",
+    )
+)
+
+
+def render_header(result: ClusterResult) -> list[str]:
+    return [
+        "<!doctype html><html lang='en'><meta charset='utf-8'>",
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>",
+        f"<title>Prism social circles</title><style>{DOCUMENT_STYLE}</style><body>",
+        "<h1>Prism social circles</h1>",
+        f"<p>Snapshot <code>{html(result['snapshot_id'])}</code>. "
+        f"Interactions from {html(result.get('cutoff'))} through {html(result['created_at'])}.</p>",
+        f"<p>{len(result.get('groups', []))} active circles; "
+        f"{len(result.get('unassigned', []))} unassigned accounts. "
+        f"Resolution {html(result.get('chosen_resolution'))}; "
+        f"seed {html(result.get('chosen_seed'))}.</p>",
+        f"<p>Publication: <strong>{html(result['publishing']['status'])}</strong>. "
+        f"{html(result['publishing'].get('error') or '')}</p>",
+        f"<p>Planned writes: {html(result['publishing'].get('planned_writes'))}. "
+        f"Confirmed writes: {html(result['publishing'].get('writes', 0))}. "
+        f"Confirmed batches: {html(result['publishing'].get('batches', 0))}.</p>",
+        "<nav><a href='#coverage'>Coverage</a> · <a href='#unassigned'>Unassigned accounts</a> · "
+        "<a href='#settings'>Scoring and settings</a></nav>",
+    ]
+
 
 def publication_summary(snapshot: RunRecord) -> PublicationSummary:
     intent = snapshot["publication"]
@@ -72,34 +108,7 @@ def person_link(person: Person) -> str:
 
 
 def render_report(result: ClusterResult) -> str:
-    sections = [
-        "<!doctype html><html lang='en'><meta charset='utf-8'>",
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>",
-        "<title>Prism social circles</title><style>",
-        "body{font:16px/1.55 system-ui,sans-serif;max-width:1100px;margin:auto;padding:24px;",
-        "color:#17213a;background:#fafbff}a{color:#174bab}small{color:#4d5870}",
-        "table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}",
-        "th,td{text-align:left;padding:8px;border-bottom:1px solid #d3daea;vertical-align:top}",
-        "section{margin:28px 0;padding:20px;background:white;border:1px solid #d3daea;",
-        "border-radius:12px}summary{cursor:pointer;font-weight:600}li{margin:5px 0}",
-        ".members{columns:3;column-width:250px}code{overflow-wrap:anywhere}",
-        ".list-icon{display:inline-block;width:36px;height:36px;vertical-align:middle;"
-        "margin-right:12px;border:1px solid #d3daea}",
-        "</style><body><h1>Prism social circles</h1>",
-        f"<p>Snapshot <code>{html(result['snapshot_id'])}</code>. "
-        f"Interactions from {html(result.get('cutoff'))} through {html(result['created_at'])}.</p>",
-        f"<p>{len(result.get('groups', []))} active circles; "
-        f"{len(result.get('unassigned', []))} unassigned accounts. "
-        f"Resolution {html(result.get('chosen_resolution'))}; "
-        f"seed {html(result.get('chosen_seed'))}.</p>",
-        f"<p>Publication: <strong>{html(result['publishing']['status'])}</strong>. "
-        f"{html(result['publishing'].get('error') or '')}</p>",
-        f"<p>Planned writes: {html(result['publishing'].get('planned_writes'))}. "
-        f"Confirmed writes: {html(result['publishing'].get('writes', 0))}. "
-        f"Confirmed batches: {html(result['publishing'].get('batches', 0))}.</p>",
-        "<nav><a href='#coverage'>Coverage</a> · <a href='#unassigned'>Unassigned accounts</a> · "
-        "<a href='#settings'>Scoring and settings</a></nav>",
-    ]
+    sections = render_header(result)
     for group in result.get("groups", []):
         icon = (
             f"<span class='list-icon' role='img' "
