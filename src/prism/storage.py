@@ -196,11 +196,9 @@ class Store:
             )
 
 
-def read_json(path: Path) -> object:
-    if path.suffix == ".gz":
-        with gzip.open(path, "rt", encoding="utf-8") as source:
-            return json.load(source)
-    return json.loads(path.read_text(encoding="utf-8"))
+def read_gzipped_json(path: Path) -> object:
+    with gzip.open(path, "rt", encoding="utf-8") as source:
+        return json.load(source)
 
 
 def write_json(path: Path, value: object, *, compress: bool = False) -> None:

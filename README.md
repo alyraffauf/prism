@@ -1,6 +1,8 @@
 # Prism
 
-Prism turns the accounts you follow into gemstone-named Bluesky lists. It groups people using follows and the last 90 days of replies, quotes, and reposts.
+Prism uses the Leiden algorithm to discover community clusters within your Bluesky follows, then creates curation lists for each.
+
+Communities are discovered by weighing follows (one-way and mutual), plus the last 90 days of replies, quotes, and reposts. It's a good way to keep track of subsets of the accounts you follow when algorithmic feeds drown them out.
 
 ## Get started
 
@@ -33,9 +35,8 @@ uv run prism recluster reports/SNAPSHOT/snapshot.json.gz --settings experiment.j
 This stays offline and writes a new report.
 
 Each online run writes a readable `result.json` with the 50 strongest connections in each group
-and a compressed `snapshot.json.gz` with the full reclustering input. Prism also accepts legacy
-uncompressed snapshots. Completed SQLite run records keep collection data but discard the copied
-clustering result and publication plan.
+and a compressed `snapshot.json.gz` with the full reclustering input. Completed SQLite run records
+keep collection data but discard the copied clustering result and publication plan.
 
 ## Check the code
 

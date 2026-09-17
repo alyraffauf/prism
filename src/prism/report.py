@@ -5,7 +5,7 @@ from html import escape
 from pathlib import Path
 from typing import cast
 
-from .models.clustering import ClusterResult, Group, PublicationSummary, WeightedConnection
+from .models.clustering import ClusterResult, PublicationSummary
 from .models.collection import CollectedSnapshot, Person
 from .models.runs import RunRecord
 from .storage import write_json
@@ -71,11 +71,6 @@ def person_link(person: Person) -> str:
     )
 
 
-def group_connections(group: Group) -> list[WeightedConnection]:
-    """Read version 2 evidence or its version 1 predecessor."""
-    return group.get("strongest_connections", group.get("connections", []))
-
-
 def render_report(result: ClusterResult) -> str:
     sections = [
         "<!doctype html><html lang='en'><meta charset='utf-8'>",
@@ -129,7 +124,7 @@ def render_report(result: ClusterResult) -> str:
             "<th>Combined weight</th></tr>"
         )
         members = {person["did"]: person for person in group["members"]}
-        for edge in group_connections(group):
+        for edge in group["strongest_connections"]:
             directions = len(edge["follow_directions"])
             follow = {0: "None", 1: "One-way", 2: "Mutual"}[directions]
             counts = (

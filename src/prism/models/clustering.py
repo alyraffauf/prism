@@ -59,9 +59,6 @@ class NamedGroup(GroupDraft):
 class Group(TypedDict):
     members: list[Person]
     strongest_connections: list[WeightedConnection]
-    # Version 1 results used this field. Keep it readable so interrupted runs
-    # created by an older Prism version can still produce a report.
-    connections: NotRequired[list[WeightedConnection]]
     name: str
     overlap: float
     previous_uri: str | None
@@ -88,7 +85,6 @@ class PublicationSummary(TypedDict):
 
 
 class ClusterResult(TypedDict):
-    version: int
     snapshot_id: str
     created_at: str
     cutoff: str

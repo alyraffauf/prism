@@ -4,7 +4,6 @@ import asyncio
 import base64
 import copy
 import hashlib
-import re
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any, cast
@@ -139,23 +138,15 @@ def managed_lists(repository: Repository, registered: list[ManagedList]) -> list
         value = record["value"]
         meta = value.get(METADATA, {})
         gem = meta.get("gem")
-        # The stored URI identifies lists created under earlier naming rules.
-        # Display names alone do not prove that Prism owns a list.
-        recovered = gem and meta.get("uri") == uri and MARKER in value.get("description", "")
-        if uri not in known and not recovered:
+        if uri not in known:
             continue
         check_marker(record)
-        prior = known.get(uri)
-        snapshot = meta.get("snapshot") or (prior["last_snapshot"] if prior else None)
-        if not snapshot:
-            match = re.search(r"\d{4}-\d{2}-\d{2}", value.get("description", ""))
-            snapshot = match.group() if match else value["createdAt"][:10]
         known[uri] = {
             "uri": uri,
-            "name": prior["name"] if prior else gem,
+            "name": gem,
             "members": sorted(by_list[uri]),
-            "last_snapshot": snapshot,
-            "active": meta.get("active", prior["active"] if prior else True),
+            "last_snapshot": meta["snapshot"],
+            "active": meta["active"],
             "value": value,
         }
     names = [entry["name"] for entry in known.values()]
@@ -206,7 +197,6 @@ def make_inactive_entry(entry: ManagedList) -> ManagedList:
         f"Membership retained. {MARKER}",
         METADATA: {
             **old.get(METADATA, {}),
-            "version": 1,
             "uri": entry["uri"],
             "gem": entry["name"],
             "snapshot": entry["last_snapshot"],
@@ -253,7 +243,6 @@ def make_intent(
             "purpose": PURPOSE,
             "createdAt": old.get("createdAt", result["created_at"]),
             METADATA: {
-                "version": 1,
                 "uri": uri,
                 "gem": group["name"],
                 "snapshot": result["created_at"][:10],
@@ -334,7 +323,7 @@ def plan_changes(intent: PublicationIntent, repository: Repository) -> list[Writ
         if existing:
             check_marker(existing)
             meta = existing["value"].get(METADATA, {})
-            if meta.get("gem", entry["name"]) != entry["name"]:
+            if meta.get("gem") != entry["name"]:
                 raise APIError(f"List identity collision at {uri}")
         if not entry["active"] and not existing:
             continue

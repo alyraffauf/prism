@@ -21,7 +21,7 @@ from .collect import DEFAULT_CONCURRENCY, Collector
 from .models.collection import validate_collected_snapshot
 from .models.publication import validate_managed_lists
 from .report import write_report
-from .storage import Store, read_json
+from .storage import Store, read_gzipped_json
 from .workflow import execute_online
 
 app = typer.Typer(
@@ -160,7 +160,7 @@ def resume(
 @app.command()
 def recluster(
     snapshot: Annotated[
-        str, typer.Argument(help="Snapshot ID in SQLite, or exported JSON, optionally gzipped")
+        str, typer.Argument(help="Snapshot ID in SQLite, or an exported gzip-compressed JSON file")
     ],
     lists: ListsOption = None,
     settings: SettingsOption = None,
@@ -172,7 +172,7 @@ def recluster(
     with open_store(database) as store:
         source = Path(snapshot)
         if source.is_file():
-            exported = validate_collected_snapshot(read_json(source), "imported snapshot")
+            exported = validate_collected_snapshot(read_gzipped_json(source), "imported snapshot")
         else:
             saved = store.snapshot(snapshot)
             exported = Collector(None, store, saved).export()

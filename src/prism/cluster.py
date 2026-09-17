@@ -376,7 +376,6 @@ def cluster_snapshot(
     return cast(
         ClusterResult,
         {
-            "version": 2,
             "snapshot_id": snapshot["id"],
             "created_at": snapshot["created_at"],
             "cutoff": snapshot["cutoff"],
