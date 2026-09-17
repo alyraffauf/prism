@@ -22,7 +22,7 @@ from .models.clustering import (
     WeeklyEvidence,
     WeightedConnection,
 )
-from .models.collection import CollectedSnapshot
+from .models.collection import CollectedSnapshot, Person
 from .models.publication import ManagedList
 
 GEMS = tuple(GEM_COLORS)
@@ -82,7 +82,7 @@ class ClusterOptions:
             raise ValueError("Seeds must be integers between 0 and 2147483647")
 
 
-def weighted_edges(
+def collect_edge_evidence(
     snapshot: CollectedSnapshot, options: ClusterOptions
 ) -> list[WeightedConnection]:
     members = {person["did"] for person in snapshot["people"]}
@@ -164,6 +164,12 @@ def weighted_edges(
                 "examples": events[:5],
             }
         )
+    return edges
+
+
+def normalize_edge_weights(
+    edges: list[WeightedConnection], options: ClusterOptions
+) -> list[WeightedConnection]:
     follow_total = sum(edge["follow_weight"] for edge in edges)
     interaction_total = sum(edge["interaction_weight"] for edge in edges)
     follow_influence = options.follow_influence if interaction_total else 1
@@ -178,6 +184,13 @@ def weighted_edges(
             + edge["interaction_normalized"] * interaction_influence
         )
     return edges
+
+
+def weighted_edges(
+    snapshot: CollectedSnapshot, options: ClusterOptions
+) -> list[WeightedConnection]:
+    """Collect connection evidence, then scale its two evidence sources."""
+    return normalize_edge_weights(collect_edge_evidence(snapshot, options), options)
 
 
 def assign_names(groups: list[GroupDraft], previous: list[ManagedList]) -> list[NamedGroup]:
@@ -249,11 +262,147 @@ def connected_groups(membership: list[int], graph: igraph.Graph) -> list[list[in
 
 
 def candidate_preference(candidate: ClusterCandidate) -> tuple[int, float, float]:
+    # Prefer the requested list count first, then useful group sizes, then stability.
     return (
         -candidate["list_count_distance"],
         candidate["preferred_size_fraction"],
         candidate["agreement"],
     )
+
+
+def build_graph_layers(
+    edges: list[WeightedConnection], node_indices: dict[str, int], options: ClusterOptions
+) -> tuple[igraph.Graph, list[igraph.Graph], list[float]]:
+    connection_graph = igraph.Graph(
+        n=len(node_indices),
+        edges=[
+            (node_indices[edge["source"]], node_indices[edge["target"]])
+            for edge in edges
+            if edge["weight"] > 0
+        ],
+    )
+    evidence_layers: list[igraph.Graph] = []
+    layer_influences: list[float] = []
+    for weight_key, influence in (
+        ("follow_normalized", options.follow_influence),
+        ("interaction_normalized", 1 - options.follow_influence),
+    ):
+        layer_edges = [edge for edge in edges if edge[weight_key] > 0]
+        if not layer_edges:
+            continue
+        layer = igraph.Graph(
+            n=len(node_indices),
+            edges=[
+                (node_indices[edge["source"]], node_indices[edge["target"]]) for edge in layer_edges
+            ],
+        )
+        layer.es["weight"] = [edge[weight_key] for edge in layer_edges]
+        evidence_layers.append(layer)
+        layer_influences.append(influence)
+    if len(evidence_layers) == 1:
+        layer_influences = [1]
+    return connection_graph, evidence_layers, layer_influences
+
+
+def evaluate_candidates(
+    layers: list[igraph.Graph],
+    layer_influences: list[float],
+    connection_graph: igraph.Graph,
+    options: ClusterOptions,
+    node_count: int,
+) -> list[ClusterCandidate]:
+    candidates: list[ClusterCandidate] = []
+    for resolution in options.resolutions if layers else ():
+        trials: list[CandidateTrial] = []
+        for seed in options.seeds:
+            partitions = [
+                leidenalg.RBConfigurationVertexPartition(
+                    layer, weights="weight", resolution_parameter=resolution
+                )
+                for layer in layers
+            ]
+            optimiser = leidenalg.Optimiser()
+            optimiser.set_rng_seed(seed)
+            optimiser.optimise_partition_multiplex(
+                partitions, layer_weights=layer_influences, n_iterations=-1
+            )
+            quality = sum(
+                partition.quality() * influence
+                for partition, influence in zip(partitions, layer_influences, strict=True)
+            )
+            trials.append({"seed": seed, "score": quality, "membership": partitions[0].membership})
+        best_trial = max(trials, key=lambda trial: trial["score"])
+        communities = connected_groups(best_trial["membership"], connection_graph)
+        publishable_groups = [group for group in communities if len(group) >= options.min_size]
+        list_count = len(publishable_groups)
+        agreements = [
+            igraph.compare_communities(
+                first["membership"], second["membership"], method="adjusted_rand"
+            )
+            for first, second in combinations(trials, 2)
+        ]
+        candidates.append(
+            {
+                "resolution": resolution,
+                "seed": best_trial["seed"],
+                "score": best_trial["score"],
+                "trials": trials,
+                "groups": communities,
+                "publishable_count": list_count,
+                "list_count_distance": max(
+                    options.preferred_lists_min - list_count,
+                    0,
+                    list_count - options.preferred_lists_max,
+                ),
+                "preferred_size_fraction": sum(
+                    len(group)
+                    for group in publishable_groups
+                    if options.preferred_size_min <= len(group) <= options.preferred_size_max
+                )
+                / node_count
+                if node_count
+                else 0,
+                "agreement": sum(agreements) / len(agreements) if agreements else 1,
+            }
+        )
+    return candidates
+
+
+def draft_groups(
+    communities: list[list[int]],
+    nodes: list[str],
+    people: dict[str, Person],
+    edges: list[WeightedConnection],
+    min_size: int,
+) -> tuple[list[GroupDraft], list[list[str]]]:
+    group_drafts: list[GroupDraft] = []
+    small_groups: list[list[str]] = []
+    for community in communities:
+        member_dids = {nodes[index] for index in community}
+        if len(community) < min_size:
+            small_groups.append(sorted(member_dids))
+            continue
+        group_edges = [
+            edge
+            for edge in edges
+            if edge["source"] in member_dids and edge["target"] in member_dids
+        ]
+        strengths: defaultdict[str, float] = defaultdict(float)
+        for edge in group_edges:
+            strengths[edge["source"]] += edge["weight"]
+            strengths[edge["target"]] += edge["weight"]
+        group_drafts.append(
+            {
+                "members": [
+                    cast(Person, {**people[did], "strength": strengths[did]})
+                    for did in sorted(member_dids, key=lambda did: (-strengths[did], did))
+                ],
+                "connections": sorted(
+                    group_edges, key=lambda edge: (-edge["weight"], edge["source"])
+                ),
+            }
+        )
+    return group_drafts, small_groups
 
 
 def cluster_snapshot(
@@ -263,111 +412,15 @@ def cluster_snapshot(
     nodes = sorted(people)
     indices = {did: index for index, did in enumerate(nodes)}
     edges = weighted_edges(snapshot, options)
-    union = igraph.Graph(
-        n=len(nodes),
-        edges=[
-            (indices[edge["source"]], indices[edge["target"]])
-            for edge in edges
-            if edge["weight"] > 0
-        ],
+    connection_graph, evidence_layers, layer_influences = build_graph_layers(
+        edges, indices, options
     )
-    graphs, influences = [], []
-    for weight_key, influence in (
-        ("follow_normalized", options.follow_influence),
-        ("interaction_normalized", 1 - options.follow_influence),
-    ):
-        if weight_key == "follow_normalized":
-            selected = [edge for edge in edges if edge["follow_normalized"] > 0]
-            graph_weights = [edge["follow_normalized"] for edge in selected]
-        else:
-            selected = [edge for edge in edges if edge["interaction_normalized"] > 0]
-            graph_weights = [edge["interaction_normalized"] for edge in selected]
-        if not selected:
-            continue
-        graph = igraph.Graph(
-            n=len(nodes),
-            edges=[(indices[edge["source"]], indices[edge["target"]]) for edge in selected],
-        )
-        graph.es["weight"] = graph_weights
-        graphs.append(graph)
-        influences.append(influence)
-    if len(graphs) == 1:
-        influences = [1]
-    candidates: list[ClusterCandidate] = []
-    for resolution in options.resolutions if graphs else ():
-        trials: list[CandidateTrial] = []
-        for seed in options.seeds:
-            partitions = [
-                leidenalg.RBConfigurationVertexPartition(
-                    graph, weights="weight", resolution_parameter=resolution
-                )
-                for graph in graphs
-            ]
-            optimiser = leidenalg.Optimiser()
-            optimiser.set_rng_seed(seed)
-            optimiser.optimise_partition_multiplex(
-                partitions, layer_weights=influences, n_iterations=-1
-            )
-            quality = sum(
-                partition.quality() * influence
-                for partition, influence in zip(partitions, influences, strict=True)
-            )
-            trials.append({"seed": seed, "score": quality, "membership": partitions[0].membership})
-        best = max(trials, key=lambda trial: trial["score"])
-        groups = connected_groups(best["membership"], union)
-        publishable = [group for group in groups if len(group) >= options.min_size]
-        count = len(publishable)
-        agreement = [
-            igraph.compare_communities(
-                first["membership"], second["membership"], method="adjusted_rand"
-            )
-            for first, second in combinations(trials, 2)
-        ]
-        candidates.append(
-            {
-                "resolution": resolution,
-                "seed": best["seed"],
-                "score": best["score"],
-                "trials": trials,
-                "groups": groups,
-                "publishable_count": count,
-                "list_count_distance": max(
-                    options.preferred_lists_min - count, 0, count - options.preferred_lists_max
-                ),
-                "preferred_size_fraction": sum(
-                    len(group)
-                    for group in publishable
-                    if options.preferred_size_min <= len(group) <= options.preferred_size_max
-                )
-                / len(nodes)
-                if nodes
-                else 0,
-                "agreement": sum(agreement) / len(agreement) if agreement else 1,
-            }
-        )
+    candidates = evaluate_candidates(
+        evidence_layers, layer_influences, connection_graph, options, len(nodes)
+    )
     chosen = max(candidates, key=candidate_preference) if candidates else None
     communities = chosen["groups"] if chosen else [[index] for index in range(len(nodes))]
-    group_drafts: list[GroupDraft] = []
-    small_groups: list[list[str]] = []
-    for community in communities:
-        members = {nodes[index] for index in community}
-        if len(community) < options.min_size:
-            small_groups.append(sorted(members))
-            continue
-        within = [edge for edge in edges if edge["source"] in members and edge["target"] in members]
-        strengths: defaultdict[str, float] = defaultdict(float)
-        for edge in within:
-            strengths[edge["source"]] += edge["weight"]
-            strengths[edge["target"]] += edge["weight"]
-        group_drafts.append(
-            {
-                "members": [
-                    {**people[did], "strength": strengths[did]}
-                    for did in sorted(members, key=lambda did: (-strengths[did], did))
-                ],
-                "connections": sorted(within, key=lambda edge: (-edge["weight"], edge["source"])),
-            }
-        )
+    group_drafts, small_groups = draft_groups(communities, nodes, people, edges, options.min_size)
     groups = [
         _result_group(named_group, snapshot["created_at"], snapshot["days"])
         for named_group in assign_names(group_drafts, previous)
