@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "prism"
+version = "0.1.0"
+description = "Find social circles and synchronize gemstone-named Bluesky lists."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "atproto>=0.0.72,<0.1",
+  "httpx>=0.28,<1",
+  "igraph>=0.11,<2",
+  "leidenalg>=0.10,<1",
+  "python-dotenv>=1,<2",
+  "typer>=0.27.2,<1",
+]
+
+[project.scripts]
+prism = "prism.cli:app"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11,<1",
+    "ty>=0.0.81",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ty.src]
+include = ["src"]
