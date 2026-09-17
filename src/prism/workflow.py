@@ -89,6 +89,7 @@ async def _publish_if_requested(
     snapshot: RunRecord,
     context: PublicationContext,
     password_provider: PasswordProvider,
+    progress: ProgressReporter,
 ) -> None:
     if snapshot["dry_run"]:
         return
@@ -96,7 +97,7 @@ async def _publish_if_requested(
     await api.authenticate(context.pds, snapshot["actor"]["did"], password)
     del password
     await synchronize(
-        PublicationExecutionContext(api, context.pds, store, snapshot, progress=print)
+        PublicationExecutionContext(api, context.pds, store, snapshot, progress=progress)
     )
 
 
@@ -119,7 +120,7 @@ def _complete_run(
         raise ValueError("The run has no clustering result")
     result["publishing"] = publication_summary(snapshot)
     write_report(directory, result, _report_snapshot(collector, exported))
-    store.complete_snapshot(snapshot)
+    store.complete_snapshot(snapshot, preserve_plan=snapshot["dry_run"])
     progress(f"{len(result['groups'])} circles; report: {directory / 'report.html'}")
 
 
@@ -160,7 +161,7 @@ async def execute_online(
         context = await _load_publication_context(api, store, snapshot)
         _initialize_publication(snapshot, exported, context)
         _checkpoint_plan(store, snapshot, context.repository)
-        await _publish_if_requested(api, store, snapshot, context, password_provider)
+        await _publish_if_requested(api, store, snapshot, context, password_provider, progress)
         _complete_run(store, snapshot, collector, exported, directory, progress)
     except (APIError, ValueError, KeyboardInterrupt, asyncio.CancelledError) as error:
         _write_failure_artifacts(

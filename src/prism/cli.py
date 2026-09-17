@@ -119,11 +119,20 @@ def run(
     with open_store(database) as store:
         if pending := store.pending():
             raise ValueError(f"Snapshot {pending['id']} is unfinished. Run prism resume first")
-        options = options_for(settings=settings, resolution=resolution, lists=lists)
         did = asyncio.run(resolve_actor(actor))
-        if not dry_run and not store.has_completed_dry_run(did):
-            raise ValueError(f"Complete prism run --actor {actor} --dry-run before publishing")
-        snapshot = store.create_snapshot(did, dry_run=dry_run, options=asdict(options))
+        if dry_run:
+            options = options_for(settings=settings, resolution=resolution, lists=lists)
+            snapshot = store.create_snapshot(did, dry_run=True, options=asdict(options))
+        else:
+            if lists is not None or settings is not None or resolution is not None:
+                raise ValueError(
+                    "Publishing reuses the dry-run plan. Run a new dry run to change settings"
+                )
+            snapshot = store.latest_completed_dry_run(did)
+            if snapshot is None:
+                raise ValueError(f"Complete prism run --actor {actor} --dry-run before publishing")
+            snapshot.update(dry_run=False, stage="publishing")
+            store.save_snapshot(snapshot)
         asyncio.run(
             execute_online(
                 store,

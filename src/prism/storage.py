@@ -93,22 +93,26 @@ class Store:
                 return run
         return None
 
-    def has_completed_dry_run(self, actor: str) -> bool:
-        for row in self.connection.execute("SELECT data FROM snapshots"):
+    def latest_completed_dry_run(self, actor: str) -> RunRecord | None:
+        rows = self.connection.execute("SELECT data FROM snapshots ORDER BY id DESC")
+        for row in rows:
             snapshot = validate_run_record(json.loads(row[0]), "stored run")
             if (
                 snapshot["actor"]["did"] == actor
                 and snapshot["dry_run"]
                 and snapshot["stage"] == "complete"
+                and "result" in snapshot
+                and "publication" in snapshot
             ):
-                return True
-        return False
+                return snapshot
+        return None
 
-    def complete_snapshot(self, snapshot: RunRecord) -> None:
+    def complete_snapshot(self, snapshot: RunRecord, *, preserve_plan: bool = False) -> None:
         completed = snapshot.copy()
         completed["stage"] = "complete"
-        completed.pop("result", None)
-        completed.pop("publication", None)
+        if not preserve_plan:
+            completed.pop("result", None)
+            completed.pop("publication", None)
         self.save_snapshot(completed)
 
     def task(self, task: CollectionTask) -> TaskState:

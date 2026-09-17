@@ -17,13 +17,15 @@ Open the report path that Prism prints. Add `--lists 12` if you want to aim for 
 
 ## Publish
 
-Do a dry run first, then set `BSKY_APP_PASSWORD` in your environment or `.env` and run:
+Do a dry run first. Prism saves that plan. Set `BSKY_APP_PASSWORD` in your environment or `.env`,
+then run:
 
 ```sh
 uv run prism run --actor YOUR_HANDLE
 ```
 
-If a run stops, pick it back up with `uv run prism resume`. Saved pages and publication progress are reused.
+Prism publishes the saved dry-run plan without collecting again. To change the lists or clustering settings,
+run another dry run. If publication stops, pick it back up with `uv run prism resume`.
 
 ## Recluster saved data
 
@@ -35,8 +37,8 @@ uv run prism recluster reports/SNAPSHOT/snapshot.json.gz --settings experiment.j
 This stays offline and writes a new report.
 
 Each online run writes a readable `result.json` with the 50 strongest connections in each group
-and a compressed `snapshot.json.gz` with the full reclustering input. Completed SQLite run records
-keep collection data but discard the copied clustering result and publication plan.
+and a compressed `snapshot.json.gz` with the full reclustering input. Completed dry runs keep their
+clustering result and publication plan until Prism publishes them. Completed publish runs keep collection data.
 
 ## Check the code
 
