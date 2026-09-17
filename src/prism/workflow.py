@@ -15,6 +15,7 @@ from .models.collection import CollectedSnapshot
 from .models.publication import ManagedList, Repository
 from .models.runs import RunRecord
 from .publish import (
+    PublicationExecutionContext,
     make_intent,
     managed_lists,
     plan_changes,
@@ -94,7 +95,9 @@ async def _publish_if_requested(
     password = password_provider()
     await api.authenticate(context.pds, snapshot["actor"]["did"], password)
     del password
-    await synchronize(api, store, snapshot, context.pds)
+    await synchronize(
+        PublicationExecutionContext(api, context.pds, store, snapshot, progress=print)
+    )
 
 
 def _report_snapshot(collector: Collector, exported: CollectedSnapshot) -> CollectedSnapshot:

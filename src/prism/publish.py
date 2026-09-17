@@ -6,6 +6,7 @@ import copy
 import hashlib
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 from .api import APIError, Bluesky
@@ -14,6 +15,7 @@ from .icons import gem_icon
 from .models.clustering import ClusterResult, Group
 from .models.publication import (
     ManagedList,
+    PlannedList,
     PublicationIntent,
     PublicationPreparation,
     Repository,
@@ -21,6 +23,7 @@ from .models.publication import (
     WriteKind,
     WriteOperation,
     validate_managed_lists,
+    validate_planned_lists,
     validate_repository,
 )
 from .models.runs import RunRecord
@@ -31,6 +34,15 @@ ITEM = "app.bsky.graph.listitem"
 PURPOSE = "app.bsky.graph.defs#curatelist"
 METADATA = "prism"
 TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz"
+
+
+@dataclass
+class PublicationExecutionContext:
+    api: Bluesky
+    pds: str
+    store: Store
+    snapshot: RunRecord
+    progress: Callable[[str], None]
 
 
 def record_key(identity: str) -> str:
@@ -158,6 +170,7 @@ def managed_lists(repository: Repository, registered: list[ManagedList]) -> list
 
 
 def validate_intent(intent: PublicationIntent) -> None:
+    validate_planned_lists(intent.get("lists"), "publication.lists")
     assigned = set()
     names = set()
     uris = set()
@@ -267,26 +280,27 @@ def make_intent(
             continue
         entries.append(make_inactive_entry(entry))
     for entry in entries:
-        entry["icon"] = gem_icon(entry["name"])
+        planned_entry = cast(PlannedList, entry)
+        planned_entry["icon"] = gem_icon(planned_entry["name"])
         old_value = former.get(entry["uri"], {}).get("value", {})
         old_metadata = old_value.get(METADATA, {})
-        metadata = entry["value"][METADATA]
-        metadata["icon_sha256"] = entry["icon"]["sha256"]
+        metadata = planned_entry["value"][METADATA]
+        metadata["icon_sha256"] = planned_entry["icon"]["sha256"]
         old_avatar = old_value.get("avatar", {})
         if (
-            old_metadata.get("icon_sha256") == entry["icon"]["sha256"]
+            old_metadata.get("icon_sha256") == planned_entry["icon"]["sha256"]
             and old_metadata.get("icon_cid")
             and old_avatar.get("ref", {}).get("$link") == old_metadata["icon_cid"]
         ):
-            entry["value"]["avatar"] = old_avatar
+            planned_entry["value"]["avatar"] = old_avatar
             metadata["icon_cid"] = old_metadata["icon_cid"]
         else:
-            entry["value"].pop("avatar", None)
+            planned_entry["value"].pop("avatar", None)
             metadata.pop("icon_cid", None)
     intent: PublicationIntent = {
         "actor": did,
         "created_at": result["created_at"],
-        "lists": entries,
+        "lists": cast(list[PlannedList], entries),
         "status": "pending",
         "batches": 0,
         "writes": 0,
@@ -357,8 +371,7 @@ def plan_changes(intent: PublicationIntent, repository: Repository) -> list[Writ
 
 
 async def upload_batch_icons(
-    api: Bluesky,
-    pds: str,
+    context: PublicationExecutionContext,
     batch: list[WriteOperation],
     intent: PublicationIntent,
     repository: Repository,
@@ -370,8 +383,6 @@ async def upload_batch_icons(
         if write["collection"] != LIST or "value" not in write:
             continue
         entry = entries[write["rkey"]]
-        if "icon" not in entry:
-            continue  # Pending plans from before icons were supported retain their intention.
         existing = repository["lists"].get(entry["uri"], {}).get("value", {})
         avatar = entry["value"].get("avatar")
         if avatar and existing.get("avatar") == avatar:
@@ -379,7 +390,7 @@ async def upload_batch_icons(
         # The server can expire unused uploads. Upload again if the list does not
         # already reference the saved icon, including when resuming.
         contents = base64.b64decode(entry["icon"]["png"], validate=True)
-        response = await api.repo(pds, "com.atproto.repo.uploadBlob", blob=contents)
+        response = await context.api.repo(context.pds, "com.atproto.repo.uploadBlob", blob=contents)
         blob = response.get("blob", {})
         if (
             blob.get("$type") != "blob"
@@ -395,25 +406,22 @@ async def upload_batch_icons(
 
 
 async def synchronize(
-    api: Bluesky,
-    store: Store,
-    snapshot: RunRecord,
-    pds: str,
-    progress: Callable[[str], None] = print,
+    context: PublicationExecutionContext,
 ) -> None:
     """Update the intentionally mutable run record as publication advances."""
+    snapshot = context.snapshot
     intent = snapshot["publication"]
     did = intent["actor"]
     retries = 0
     previous_changes = None
     stalled = 0
     while True:
-        repository = await read_repository(api, pds, did)
+        repository = await read_repository(context.api, context.pds, did)
         writes = plan_changes(intent, repository)
         if not writes:
             intent.update(status="complete", error=None)
-            store.register_lists(did, intent["lists"])
-            store.save_snapshot(snapshot)
+            context.store.register_lists(did, cast(list[ManagedList], intent["lists"]))
+            context.store.save_snapshot(snapshot)
             return
         signature = tuple((write["$type"], write["collection"], write["rkey"]) for write in writes)
         stalled = stalled + 1 if signature == previous_changes else 0
@@ -424,11 +432,11 @@ async def synchronize(
         for offset in range(0, len(writes), 50):
             batch = writes[offset : offset + 50]
             try:
-                intent, batch = await upload_batch_icons(api, pds, batch, intent, repository)
+                intent, batch = await upload_batch_icons(context, batch, intent, repository)
                 snapshot["publication"] = intent
-                store.save_snapshot(snapshot)
-                response = await api.repo(
-                    pds,
+                context.store.save_snapshot(snapshot)
+                response = await context.api.repo(
+                    context.pds,
                     "com.atproto.repo.applyWrites",
                     data={
                         "repo": did,
@@ -439,7 +447,7 @@ async def synchronize(
                 )
             except APIError as error:
                 intent["error"] = str(error)
-                store.save_snapshot(snapshot)
+                context.store.save_snapshot(snapshot)
                 if error.code == "InvalidSwap" or error.status >= 500 or error.status == 0:
                     retries += 1
                     if retries <= 3:
@@ -450,8 +458,8 @@ async def synchronize(
             intent.update(
                 batches=intent["batches"] + 1, writes=intent["writes"] + len(batch), error=None
             )
-            store.save_snapshot(snapshot)
-            progress(f"Synced {intent['writes']} changes in {intent['batches']} batches")
+            context.store.save_snapshot(snapshot)
+            context.progress(f"Synced {intent['writes']} changes in {intent['batches']} batches")
             commit = response.get("commit", {}).get("cid")
             if not commit:
                 restart = True

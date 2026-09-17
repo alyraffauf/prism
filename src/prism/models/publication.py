@@ -34,13 +34,16 @@ class ManagedList(TypedDict):
     last_snapshot: str
     value: dict[str, Any]
     members: list[str]
-    icon: NotRequired[Icon]
+
+
+class PlannedList(ManagedList):
+    icon: Icon
 
 
 class PublicationIntent(TypedDict):
     actor: str
     created_at: str
-    lists: list[ManagedList]
+    lists: list[PlannedList]
     status: PublicationStatus
     batches: int
     writes: int
@@ -100,3 +103,15 @@ def validate_managed_lists(value: object, field: str = "lists") -> list[ManagedL
         if not isinstance(entry.get("value"), dict):
             raise ValueError(f"Invalid {field}[{index}].value: expected an object")
     return cast(list[ManagedList], value)
+
+
+def validate_planned_lists(value: object, field: str = "planned lists") -> list[PlannedList]:
+    lists = validate_managed_lists(value, field)
+    for index, entry in enumerate(lists):
+        icon = entry.get("icon")
+        if not isinstance(icon, dict):
+            raise ValueError(f"Invalid {field}[{index}].icon: expected an object")
+        for key in ("color", "sha256", "png"):
+            if not isinstance(icon.get(key), str):
+                raise ValueError(f"Invalid {field}[{index}].icon.{key}: expected a string")
+    return cast(list[PlannedList], lists)
