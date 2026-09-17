@@ -116,6 +116,10 @@ def validate_person(value: object, field: str = "person") -> Person:
     for key in ("followsCount", "followersCount", "postsCount", "authored_post_count"):
         if key in person and person[key] is not None and type(person[key]) is not int:
             raise ValueError(f"Invalid {field}.{key}: expected an integer or null")
+    if "strength" in person and (
+        not isinstance(person["strength"], (int, float)) or isinstance(person["strength"], bool)
+    ):
+        raise ValueError(f"Invalid {field}.strength: expected a number")
     return cast(Person, person)
 
 
@@ -136,6 +140,40 @@ def validate_task_state(value: object, field: str = "task") -> TaskState:
     return cast(TaskState, state)
 
 
+def validate_coverage_state(value: object, field: str = "coverage") -> CoverageState:
+    state = _object(value, field)
+    if state.get("status") not in {"pending", "complete", "unavailable", "failed"}:
+        raise ValueError(f"Invalid {field}.status")
+    if state.get("error") is not None and not isinstance(state.get("error"), str):
+        raise ValueError(f"Invalid {field}.error: expected a string or null")
+    for key in ("pages", "restarts"):
+        if type(state.get(key)) is not int:
+            raise ValueError(f"Invalid {field}.{key}: expected an integer")
+    return cast(CoverageState, state)
+
+
+def validate_account_coverage(value: object, field: str = "account coverage") -> AccountCoverage:
+    coverage = validate_person(value, field)
+    for key in ("profile", "follows", "feed"):
+        validate_coverage_state(coverage.get(key), f"{field}.{key}")
+    for key in ("reported_follows", "follow_count_difference"):
+        if coverage.get(key) is not None and type(coverage.get(key)) is not int:
+            raise ValueError(f"Invalid {field}.{key}: expected an integer or null")
+    for key in ("fetched_follows", "invalid_timestamps"):
+        if type(coverage.get(key)) is not int:
+            raise ValueError(f"Invalid {field}.{key}: expected an integer")
+    return cast(AccountCoverage, coverage)
+
+
+def validate_event(value: object, field: str = "event") -> Event:
+    event = _object(value, field)
+    for key in ("source", "target", "uri", "time"):
+        _string(event.get(key), f"{field}.{key}")
+    if event.get("kind") not in {"reply", "quote", "repost"}:
+        raise ValueError(f"Invalid {field}.kind")
+    return cast(Event, event)
+
+
 def validate_page(value: object, kind: CollectionKind, field: str = "page") -> CollectedPage:
     page = _object(value, field)
     if kind in {"follows", "root_follows"}:
@@ -145,11 +183,7 @@ def validate_page(value: object, kind: CollectionKind, field: str = "page") -> C
         return cast(PeoplePage, page)
     events = _list(page.get("events"), f"{field}.events")
     for index, event_value in enumerate(events):
-        event = _object(event_value, f"{field}.events[{index}]")
-        for key in ("source", "target", "uri", "time"):
-            _string(event.get(key), f"{field}.events[{index}].{key}")
-        if event.get("kind") not in {"reply", "quote", "repost"}:
-            raise ValueError(f"Invalid {field}.events[{index}].kind")
+        validate_event(event_value, f"{field}.events[{index}]")
     _list(page.get("authored_posts", []), f"{field}.authored_posts")
     if type(page.get("invalid_timestamps")) is not int:
         raise ValueError(f"Invalid {field}.invalid_timestamps: expected an integer")
@@ -175,24 +209,23 @@ def validate_collected_snapshot(value: object, field: str = "snapshot") -> Colle
         ):
             raise ValueError(f"Invalid {field}.follows[{index}]: expected two account DIDs")
     events = _list(snapshot.get("events"), f"{field}.events")
-    validate_page(
-        {
-            "events": events,
-            "authored_posts": [],
-            "invalid_timestamps": 0,
-            "before_window": False,
-        },
-        "feed",
-        field,
-    )
-    root = _object(snapshot.get("root_coverage"), f"{field}.root_coverage")
-    if root.get("status") not in {"pending", "complete", "unavailable", "failed"}:
-        raise ValueError(f"Invalid {field}.root_coverage.status")
-    _list(snapshot.get("coverage"), f"{field}.coverage")
+    for index, event in enumerate(events):
+        validate_event(event, f"{field}.events[{index}]")
+    coverage = _list(snapshot.get("coverage"), f"{field}.coverage")
+    for index, account in enumerate(coverage):
+        validate_account_coverage(account, f"{field}.coverage[{index}]")
+    validate_coverage_state(snapshot.get("root_coverage"), f"{field}.root_coverage")
     _object(snapshot.get("options"), f"{field}.options")
     for key in ("days", "fetched_follows", "temporary_failures"):
         if type(snapshot.get(key)) is not int:
             raise ValueError(f"Invalid {field}.{key}: expected an integer")
+    for key in ("reported_follows", "follow_count_difference"):
+        if snapshot.get(key) is not None and type(snapshot.get(key)) is not int:
+            raise ValueError(f"Invalid {field}.{key}: expected an integer or null")
     if type(snapshot.get("dry_run")) is not bool:
         raise ValueError(f"Invalid {field}.dry_run: expected a boolean")
+    if "previous" in snapshot:
+        _list(snapshot["previous"], f"{field}.previous")
+    if "pds" in snapshot:
+        _string(snapshot["pds"], f"{field}.pds")
     return cast(CollectedSnapshot, snapshot)
